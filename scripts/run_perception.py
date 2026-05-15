@@ -46,17 +46,26 @@ def draw_overlay(frame, result, pipeline=None):
     if pipeline is not None and pipeline._initial_embedding is not None:
         target_emb = pipeline._get_target_embedding()
 
+    occluder_ids = result.get("occluder_ids", set())
     for track in result["all_tracks"]:
         x1, y1, x2, y2 = int(track[0]), int(track[1]), int(track[2]), int(track[3])
         tid = int(track[4])
         is_target = tid == result["target_id"]
-        c = (0, 255, 0) if is_target else (180, 180, 180)
-        thickness = 3 if is_target else 1
+        is_occluder = tid in occluder_ids
+
+        if is_target:
+            c, thickness = (0, 255, 0), 3
+        elif is_occluder:
+            c, thickness = (0, 128, 255), 2   # orange = excluded occluder
+        else:
+            c, thickness = (180, 180, 180), 1
+
         cv2.rectangle(frame, (x1, y1), (x2, y2), c, thickness)
 
         label = f"ID:{tid}"
-        # show live similarity score for all tracks during re-id
-        if target_emb is not None and state in (RPFState.SUSPENDED, RPFState.REIDENTIFICATION):
+        if is_occluder:
+            label += " [OCC]"
+        elif target_emb is not None and state in (RPFState.SUSPENDED, RPFState.REIDENTIFICATION):
             import numpy as _np
             emb = pipeline.reid.extract(frame, track[:4])
             sim = float(_np.dot(emb, target_emb))

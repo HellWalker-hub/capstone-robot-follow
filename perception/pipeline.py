@@ -17,8 +17,12 @@ class RPFState(Enum):
 
 class FollowPipeline:
     """
-    Perception pipeline: YOLOv8+ByteTrack → OSNet ReID → CMOH occlusion memory.
+    Perception pipeline: YOLOv8+ByteTrack → ReID → CMOH occlusion memory.
     State machine: IDLE → IDENTIFICATION → FOLLOWING ↔ SUSPENDED/REIDENTIFICATION
+
+    Occluder exclusion: track IDs continuously visible since target was lost
+    are treated as occluders and excluded from re-id candidates. The real
+    target can only re-appear as a new or briefly-absent track.
     """
 
     def __init__(self, config: dict = None):
@@ -27,7 +31,7 @@ class FollowPipeline:
             conf=cfg.get("det_conf", 0.4),
         )
         self.reid = OSNetReID(
-            model_name=cfg.get("reid_model", "osnet_x0_25"),
+            model_name=cfg.get("reid_model", "mobilenet_v3_small"),
         )
         self.cmoh = CMOH(
             k=cfg.get("cmoh_k", 10),
@@ -43,20 +47,23 @@ class FollowPipeline:
 
         self._reid_confirm_count = 0
         self._reid_confirm_needed = cfg.get("reid_confirm_frames", 3)
-        self._reid_threshold = cfg.get("reid_threshold", 0.60)
         self._reid_candidate_id: int | None = None
+
+        # occluder exclusion: IDs visible in every frame since suspension
+        self._continuously_visible: set = set()
 
     def register_target(self, frame: np.ndarray, bbox: np.ndarray):
         """Register target from a clicked bounding box."""
         embedding = self.reid.extract(frame, bbox)
         self._initial_embedding = embedding
-        self.cmoh.update(0, embedding)  # temp id=0 until tracker assigns real id
+        self.cmoh.update(0, embedding)
         self.target_id = None
         self.state = RPFState.IDENTIFICATION
+        self._continuously_visible.clear()
         print("[Pipeline] Target registered.")
 
     def process(self, frame: np.ndarray) -> dict:
-        """Run one frame. Returns state, target_bbox, all_tracks."""
+        """Run one frame. Returns state, target_bbox, all_tracks, occluder_ids."""
         tracks = self.tracker.update(frame)
 
         result = {
@@ -64,6 +71,7 @@ class FollowPipeline:
             "target_id": self.target_id,
             "target_bbox": None,
             "all_tracks": tracks,
+            "occluder_ids": set(self._continuously_visible),
         }
 
         if self.state == RPFState.IDLE:
@@ -71,10 +79,13 @@ class FollowPipeline:
 
         if len(tracks) == 0:
             self._handle_no_tracks()
+            # no tracks during suspension — clear occluder set so a returning
+            # target isn't blocked by a stale occluder ID
+            if self.state in (RPFState.SUSPENDED, RPFState.REIDENTIFICATION):
+                self._continuously_visible.clear()
             result["state"] = self.state
             return result
 
-        # extract embeddings for all current tracks
         track_embeddings = {}
         for track in tracks:
             tid = int(track[4])
@@ -86,10 +97,12 @@ class FollowPipeline:
         elif self.state == RPFState.FOLLOWING:
             self._follow(track_embeddings)
         elif self.state in (RPFState.SUSPENDED, RPFState.REIDENTIFICATION):
+            self._update_occluders(track_embeddings)
             self._reidentify(track_embeddings)
 
         result["state"] = self.state
         result["target_id"] = self.target_id
+        result["occluder_ids"] = set(self._continuously_visible)
         if self.target_id is not None:
             for track in tracks:
                 if int(track[4]) == self.target_id:
@@ -117,15 +130,43 @@ class FollowPipeline:
         else:
             self._lost_frames += 1
             if self._lost_frames >= self._lost_threshold:
-                print(f"[Pipeline] Target lost → SUSPENDED")
+                # entering suspension — seed occluder set with everyone visible now
+                self._continuously_visible = set(embeddings.keys())
+                self._reid_confirm_count = 0
+                self._reid_candidate_id = None
+                print("[Pipeline] Target lost → SUSPENDED")
                 self.state = RPFState.SUSPENDED
 
+    def _update_occluders(self, embeddings: dict):
+        """
+        Intersect continuously_visible with current track IDs each frame.
+        A track that disappears even briefly is no longer considered an occluder —
+        it could be the target re-emerging from behind them.
+        """
+        current_ids = set(embeddings.keys())
+        self._continuously_visible &= current_ids
+
     def _reidentify(self, embeddings: dict):
-        # compare each visible track's embedding against the stored target embedding
-        # (cmoh.match only checks known IDs — won't find a reappearing person with a new track ID)
+        """
+        Match each non-occluder track against stored target embedding.
+        Occluders (continuously visible since suspension) are excluded.
+        """
         target_emb = self._get_target_embedding()
+
+        # only consider tracks that weren't continuously present since the target was lost
+        candidates = {
+            tid: emb for tid, emb in embeddings.items()
+            if tid not in self._continuously_visible
+        }
+
+        if not candidates:
+            # only occluders visible — wait for target to emerge
+            if self.state == RPFState.SUSPENDED:
+                self.state = RPFState.REIDENTIFICATION
+            return
+
         best_id, best_sim = None, 0.0
-        for tid, emb in embeddings.items():
+        for tid, emb in candidates.items():
             sim = float(np.dot(emb, target_emb))
             if sim > best_sim:
                 best_sim = sim
@@ -142,6 +183,7 @@ class FollowPipeline:
                 self.target_id = best_id
                 self.cmoh.register(best_id)
                 self.cmoh.update(best_id, embeddings[best_id])
+                self._continuously_visible.clear()
                 self.state = RPFState.FOLLOWING
                 self._lost_frames = 0
                 self._reid_confirm_count = 0
@@ -156,6 +198,9 @@ class FollowPipeline:
         if self.state == RPFState.FOLLOWING:
             self._lost_frames += 1
             if self._lost_frames >= self._lost_threshold:
+                self._continuously_visible.clear()
+                self._reid_confirm_count = 0
+                self._reid_candidate_id = None
                 self.state = RPFState.SUSPENDED
 
     def _get_target_embedding(self) -> np.ndarray:
