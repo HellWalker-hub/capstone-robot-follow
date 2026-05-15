@@ -289,6 +289,10 @@ class FollowPipeline:
     # Helpers
     # ------------------------------------------------------------------
 
+    def _get_target_embedding(self) -> np.ndarray | None:
+        """Return the clean registration embedding used for all re-id decisions."""
+        return self._initial_embedding
+
     def _is_diverse(self, emb: np.ndarray) -> bool:
         if self._reg_current_mean is None:
             return True
