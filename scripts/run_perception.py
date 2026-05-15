@@ -21,6 +21,7 @@ STATE_COLORS = {
 }
 
 clicked_point = None
+target_thumbnail = None  # stores last known crop of registered target
 
 
 def mouse_callback(event, x, y, flags, param):
@@ -71,9 +72,20 @@ def draw_overlay(frame, result, pipeline=None):
         cv2.putText(frame, "Click a person to follow", (5, 55),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 1)
     elif state in (RPFState.SUSPENDED, RPFState.REIDENTIFICATION):
-        thresh = pipeline.cmoh.sim_threshold if pipeline else 0.55
+        thresh = pipeline.cmoh.sim_threshold if pipeline else 0.60
         cv2.putText(frame, f"Searching... threshold={thresh:.2f}", (5, 55),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
+
+    # target thumbnail — bottom-left corner
+    if target_thumbnail is not None:
+        h, w = frame.shape[:2]
+        th, tw = target_thumbnail.shape[:2]
+        pad = 8
+        y_off, x_off = h - th - pad, pad
+        cv2.rectangle(frame, (x_off - 2, y_off - 18), (x_off + tw + 2, y_off + th + 2), (50, 50, 50), -1)
+        frame[y_off:y_off+th, x_off:x_off+tw] = target_thumbnail
+        cv2.putText(frame, "TARGET", (x_off, y_off - 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
 
 
 def main():
@@ -113,6 +125,12 @@ def main():
             bbox = find_bbox_at_click(result["all_tracks"], clicked_point)
             if bbox is not None:
                 pipeline.register_target(frame, bbox)
+                # save thumbnail of registered target
+                global target_thumbnail
+                x1, y1, x2, y2 = map(int, bbox[:4])
+                crop = frame[max(0,y1):y2, max(0,x1):x2]
+                if crop.size > 0:
+                    target_thumbnail = cv2.resize(crop, (80, 160))
             else:
                 print("[Main] No tracked person at that location.")
             clicked_point = None

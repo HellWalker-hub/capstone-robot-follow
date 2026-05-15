@@ -31,7 +31,7 @@ class FollowPipeline:
         )
         self.cmoh = CMOH(
             k=cfg.get("cmoh_k", 10),
-            sim_threshold=cfg.get("reid_threshold", 0.55),
+            sim_threshold=cfg.get("reid_threshold", 0.60),
         )
 
         self.state = RPFState.IDLE
@@ -43,6 +43,7 @@ class FollowPipeline:
 
         self._reid_confirm_count = 0
         self._reid_confirm_needed = cfg.get("reid_confirm_frames", 3)
+        self._reid_threshold = cfg.get("reid_threshold", 0.60)
         self._reid_candidate_id: int | None = None
 
     def register_target(self, frame: np.ndarray, bbox: np.ndarray):
