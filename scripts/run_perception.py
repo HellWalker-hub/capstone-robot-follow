@@ -82,13 +82,20 @@ def draw_overlay(frame, result, pipeline=None):
         cv2.putText(frame, "Click a person to follow", (5, 55),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 1)
     elif state == RPFState.REGISTERING and pipeline is not None:
+        n = result.get("reg_diverse_count", 0)
+        target = result.get("reg_target", 20)
         prog = pipeline.registration_progress
         bar_w = 300
         filled = int(bar_w * prog)
+        # bar colour: yellow → green once min frames reached
+        bar_color = (0, 220, 80) if pipeline.registration_ready else (255, 200, 0)
         cv2.rectangle(frame, (5, 40), (5 + bar_w, 58), (60, 60, 60), -1)
-        cv2.rectangle(frame, (5, 40), (5 + filled, 58), (255, 200, 0), -1)
-        cv2.putText(frame, f"Registering... {int(prog*100)}%  (turn slowly)", (5, 75),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 200, 0), 1)
+        cv2.rectangle(frame, (5, 40), (5 + filled, 58), bar_color, -1)
+        if pipeline.registration_ready:
+            msg = f"Good! {n}/{target} views — keep turning for more coverage"
+        else:
+            msg = f"Turn slowly... {n}/{target} diverse views captured"
+        cv2.putText(frame, msg, (5, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.48, bar_color, 1)
     elif state in (RPFState.SUSPENDED, RPFState.REIDENTIFICATION):
         thresh = pipeline.cmoh.sim_threshold if pipeline else 0.60
         cv2.putText(frame, f"Searching... threshold={thresh:.2f}", (5, 55),
