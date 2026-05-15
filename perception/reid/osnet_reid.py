@@ -1,67 +1,105 @@
-import torch
-import torch.nn as nn
+"""
+Person ReID using OpenCV YoutuReID ONNX model.
+Proper ReID training (not ImageNet) — discriminates identity not just clothing.
+
+Part-based weighting for kandoora/thobe environments:
+- Body embedding dominated by white clothing → low discriminability
+- Head region (face, hair, glasses, headwear) → high discriminability
+- Combined: head_weight * head_emb + body_weight * full_body_emb
+"""
+import os
 import numpy as np
 import cv2
-from torchvision import transforms, models
+import onnxruntime as ort
+
+WEIGHTS_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "weights",
+                            "person_reid_youtu_2021nov.onnx")
+WEIGHTS_PATH = os.path.normpath(WEIGHTS_PATH)
+
+EMBED_DIM = 768  # YoutuReID output dimension
 
 
 class OSNetReID:
     """
-    MobileNetV3-Small ReID embedding extractor.
-    Uses torchvision pretrained weights — no external dependency.
-    Outputs 576-d L2-normalized embeddings. Fast on M1 MPS.
+    YoutuReID ONNX inference with part-based head/body weighting.
+    Class kept as OSNetReID so pipeline.py needs no changes.
     """
 
-    def __init__(self, model_name="mobilenet_v3_small", device=None):
-        if device is None:
-            if torch.backends.mps.is_available():
-                device = "mps"
-            elif torch.cuda.is_available():
-                device = "cuda"
-            else:
-                device = "cpu"
-        self.device = device
+    def __init__(self, model_name="youtureid", device=None,
+                 head_weight=0.6, body_weight=0.4,
+                 head_fraction=0.35):
+        """
+        Args:
+            head_weight:   contribution of head-region embedding
+            body_weight:   contribution of full-body embedding
+            head_fraction: top fraction of bbox height treated as head
+        """
+        self.head_weight = head_weight
+        self.body_weight = body_weight
+        self.head_fraction = head_fraction
 
-        backbone = models.mobilenet_v3_small(
-            weights=models.MobileNet_V3_Small_Weights.IMAGENET1K_V1
+        if not os.path.exists(WEIGHTS_PATH):
+            raise FileNotFoundError(
+                f"ReID weights not found: {WEIGHTS_PATH}\n"
+                "Run: python scripts/download_weights.py"
+            )
+
+        # onnxruntime CPU — fast enough on M1, same binary runs on RPi4/Jetson
+        self.session = ort.InferenceSession(
+            WEIGHTS_PATH,
+            providers=["CPUExecutionProvider"]
         )
-        # strip classifier — use avgpool output as embedding
-        self.model = nn.Sequential(*list(backbone.children())[:-1])
-        self.model.eval()
-        self.model.to(device)
+        self.input_name = self.session.get_inputs()[0].name
+        self.output_name = self.session.get_outputs()[0].name
 
-        self.transform = transforms.Compose([
-            transforms.ToPILImage(),
-            transforms.Resize((256, 128)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225]),
-        ])
-        print(f"[ReID] MobileNetV3-Small on {device}")
+        # input size from model: (batch, 3, 256, 128)
+        self._h, self._w = 256, 128
 
-    @torch.no_grad()
+        print(f"[ReID] YoutuReID ONNX ({EMBED_DIM}-d) | "
+              f"head={head_weight:.0%} body={body_weight:.0%}")
+
     def extract(self, frame: np.ndarray, bbox: np.ndarray) -> np.ndarray:
         """
-        Extract embedding for a person crop.
+        Extract part-weighted embedding from a person bounding box.
+
         Args:
             frame: BGR image (H, W, 3)
-            bbox: [x1, y1, x2, y2]
+            bbox:  [x1, y1, x2, y2]
         Returns:
-            L2-normalized embedding vector
+            EMBED_DIM-d L2-normalized embedding
         """
         x1, y1, x2, y2 = map(int, bbox[:4])
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
-        crop = frame[y1:y2, x1:x2]
-        if crop.size == 0:
-            return np.zeros(576, dtype=np.float32)
+        x1 = max(0, x1); y1 = max(0, y1)
+        x2 = min(frame.shape[1], x2); y2 = min(frame.shape[0], y2)
 
-        crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-        tensor = self.transform(crop_rgb).unsqueeze(0).to(self.device)
-        feat = self.model(tensor)
-        feat = feat.squeeze().cpu().numpy().flatten()
+        if x2 <= x1 or y2 <= y1:
+            return np.zeros(EMBED_DIM, dtype=np.float32)
+
+        body_emb = self._embed(frame[y1:y2, x1:x2])
+
+        head_h = max(int((y2 - y1) * self.head_fraction), 20)
+        head_emb = self._embed(frame[y1:y1 + head_h, x1:x2])
+
+        combined = self.head_weight * head_emb + self.body_weight * body_emb
+        norm = np.linalg.norm(combined)
+        return (combined / (norm + 1e-6)).astype(np.float32)
+
+    def _embed(self, crop: np.ndarray) -> np.ndarray:
+        if crop.size == 0 or crop.shape[0] < 4 or crop.shape[1] < 4:
+            return np.zeros(EMBED_DIM, dtype=np.float32)
+
+        # preprocess: BGR→RGB, resize, normalize (ImageNet stats)
+        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        resized = cv2.resize(rgb, (self._w, self._h))
+        tensor = resized.astype(np.float32) / 255.0
+        tensor -= np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        tensor /= np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        tensor = tensor.transpose(2, 0, 1)[np.newaxis]  # (1, 3, H, W)
+
+        feat = self.session.run([self.output_name], {self.input_name: tensor})[0]
+        feat = feat.flatten()
         norm = np.linalg.norm(feat)
         return (feat / (norm + 1e-6)).astype(np.float32)
 
     def cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
-        return float(np.dot(a, b))  # both L2-normalized
+        return float(np.dot(a, b))

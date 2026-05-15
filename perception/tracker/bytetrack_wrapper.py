@@ -37,6 +37,7 @@ class PersonTracker:
             "new_track_thresh": 0.6,
             "track_buffer": track_buffer,
             "match_thresh": 0.8,
+            "fuse_score": True,
         }
         path = os.path.join(os.path.dirname(__file__), "_bytetrack_custom.yaml")
         with open(path, "w") as f:
