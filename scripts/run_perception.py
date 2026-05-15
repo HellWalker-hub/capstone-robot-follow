@@ -14,6 +14,7 @@ from perception.pipeline import FollowPipeline, RPFState
 
 STATE_COLORS = {
     RPFState.IDLE: (128, 128, 128),
+    RPFState.REGISTERING: (255, 200, 0),
     RPFState.IDENTIFICATION: (0, 255, 255),
     RPFState.FOLLOWING: (0, 255, 0),
     RPFState.SUSPENDED: (0, 165, 255),
@@ -80,6 +81,14 @@ def draw_overlay(frame, result, pipeline=None):
     if state == RPFState.IDLE:
         cv2.putText(frame, "Click a person to follow", (5, 55),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 1)
+    elif state == RPFState.REGISTERING and pipeline is not None:
+        prog = pipeline.registration_progress
+        bar_w = 300
+        filled = int(bar_w * prog)
+        cv2.rectangle(frame, (5, 40), (5 + bar_w, 58), (60, 60, 60), -1)
+        cv2.rectangle(frame, (5, 40), (5 + filled, 58), (255, 200, 0), -1)
+        cv2.putText(frame, f"Registering... {int(prog*100)}%  (turn slowly)", (5, 75),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 200, 0), 1)
     elif state in (RPFState.SUSPENDED, RPFState.REIDENTIFICATION):
         thresh = pipeline.cmoh.sim_threshold if pipeline else 0.60
         cv2.putText(frame, f"Searching... threshold={thresh:.2f}", (5, 55),

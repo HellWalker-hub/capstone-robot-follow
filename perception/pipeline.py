@@ -9,6 +9,7 @@ from perception.occlusion.cmoh import CMOH
 
 class RPFState(Enum):
     IDLE = "idle"
+    REGISTERING = "registering"   # collecting multi-frame appearance profile
     IDENTIFICATION = "identification"
     FOLLOWING = "following"
     SUSPENDED = "suspended"
@@ -52,15 +53,23 @@ class FollowPipeline:
         # occluder exclusion: IDs visible in every frame since suspension
         self._continuously_visible: set = set()
 
+        # registration phase: accumulate N frames before following
+        self._reg_frames_needed = cfg.get("registration_frames", 45)
+        self._reg_frames_collected = 0
+        self._reg_bbox: np.ndarray | None = None
+        self.registration_progress: float = 0.0  # 0.0 → 1.0, exposed for UI
+
     def register_target(self, frame: np.ndarray, bbox: np.ndarray):
-        """Register target from a clicked bounding box."""
-        embedding = self.reid.extract(frame, bbox)
-        self._initial_embedding = embedding
-        self.cmoh.update(0, embedding)
+        """Begin multi-frame registration from clicked bounding box."""
+        self._reg_bbox = bbox.copy()
+        self._reg_frames_collected = 0
+        self.registration_progress = 0.0
+        self.cmoh.clear()
+        self._initial_embedding = None
         self.target_id = None
-        self.state = RPFState.IDENTIFICATION
         self._continuously_visible.clear()
-        print("[Pipeline] Target registered.")
+        self.state = RPFState.REGISTERING
+        print(f"[Pipeline] Registration started — hold pose for {self._reg_frames_needed} frames.")
 
     def process(self, frame: np.ndarray) -> dict:
         """Run one frame. Returns state, target_bbox, all_tracks, occluder_ids."""
@@ -92,7 +101,9 @@ class FollowPipeline:
             emb = self.reid.extract(frame, track[:4])
             track_embeddings[tid] = emb
 
-        if self.state == RPFState.IDENTIFICATION:
+        if self.state == RPFState.REGISTERING:
+            self._register(frame, tracks)
+        elif self.state == RPFState.IDENTIFICATION:
             self._identify(track_embeddings)
         elif self.state == RPFState.FOLLOWING:
             self._follow(track_embeddings)
@@ -110,6 +121,42 @@ class FollowPipeline:
                     break
 
         return result
+
+    def _register(self, frame: np.ndarray, tracks: np.ndarray):
+        """
+        Collect embeddings from the registered bbox each frame.
+        Tracks the closest detected person to the clicked bbox centroid.
+        After reg_frames_needed frames, builds mean embedding and transitions
+        to IDENTIFICATION to lock onto the matching track ID.
+        """
+        if len(tracks) == 0:
+            return
+
+        # find track closest to original click bbox centre
+        cx = (self._reg_bbox[0] + self._reg_bbox[2]) / 2
+        cy = (self._reg_bbox[1] + self._reg_bbox[3]) / 2
+        best_track, best_dist = None, float("inf")
+        for track in tracks:
+            tx = (track[0] + track[2]) / 2
+            ty = (track[1] + track[3]) / 2
+            dist = (tx - cx) ** 2 + (ty - cy) ** 2
+            if dist < best_dist:
+                best_dist = dist
+                best_track = track
+
+        if best_track is None:
+            return
+
+        emb = self.reid.extract(frame, best_track[:4])
+        self.cmoh.update(0, emb)  # accumulate into temp id=0
+        self._reg_frames_collected += 1
+        self.registration_progress = self._reg_frames_collected / self._reg_frames_needed
+
+        if self._reg_frames_collected >= self._reg_frames_needed:
+            # build mean embedding as the identity reference
+            self._initial_embedding = self.cmoh.get_mean_embedding(0)
+            self.state = RPFState.IDENTIFICATION
+            print(f"[Pipeline] Registration complete ({self._reg_frames_needed} frames). Locking onto target...")
 
     def _identify(self, embeddings: dict):
         for tid, emb in embeddings.items():
