@@ -38,9 +38,12 @@ def find_bbox_at_click(tracks, point):
     return None
 
 
-def draw_overlay(frame, result):
+def draw_overlay(frame, result, pipeline=None):
     state = result["state"]
     color = STATE_COLORS.get(state, (255, 255, 255))
+    target_emb = None
+    if pipeline is not None and pipeline._initial_embedding is not None:
+        target_emb = pipeline._get_target_embedding()
 
     for track in result["all_tracks"]:
         x1, y1, x2, y2 = int(track[0]), int(track[1]), int(track[2]), int(track[3])
@@ -49,7 +52,15 @@ def draw_overlay(frame, result):
         c = (0, 255, 0) if is_target else (180, 180, 180)
         thickness = 3 if is_target else 1
         cv2.rectangle(frame, (x1, y1), (x2, y2), c, thickness)
-        cv2.putText(frame, f"ID:{tid}", (x1, y1 - 5),
+
+        label = f"ID:{tid}"
+        # show live similarity score for all tracks during re-id
+        if target_emb is not None and state in (RPFState.SUSPENDED, RPFState.REIDENTIFICATION):
+            import numpy as _np
+            emb = pipeline.reid.extract(frame, track[:4])
+            sim = float(_np.dot(emb, target_emb))
+            label += f" {sim:.2f}"
+        cv2.putText(frame, label, (x1, y1 - 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, c, 1)
 
     cv2.rectangle(frame, (0, 0), (300, 30), (0, 0, 0), -1)
@@ -59,6 +70,10 @@ def draw_overlay(frame, result):
     if state == RPFState.IDLE:
         cv2.putText(frame, "Click a person to follow", (5, 55),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 1)
+    elif state in (RPFState.SUSPENDED, RPFState.REIDENTIFICATION):
+        thresh = pipeline.cmoh.sim_threshold if pipeline else 0.55
+        cv2.putText(frame, f"Searching... threshold={thresh:.2f}", (5, 55),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
 
 
 def main():
@@ -102,7 +117,7 @@ def main():
                 print("[Main] No tracked person at that location.")
             clicked_point = None
 
-        draw_overlay(frame, result)
+        draw_overlay(frame, result, pipeline)
         cv2.imshow("Robot Follow", frame)
 
         key = cv2.waitKey(1) & 0xFF

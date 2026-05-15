@@ -42,7 +42,7 @@ class FollowPipeline:
         self._lost_threshold = cfg.get("lost_threshold", 15)
 
         self._reid_confirm_count = 0
-        self._reid_confirm_needed = cfg.get("reid_confirm_frames", 5)
+        self._reid_confirm_needed = cfg.get("reid_confirm_frames", 3)
         self._reid_candidate_id: int | None = None
 
     def register_target(self, frame: np.ndarray, bbox: np.ndarray):
@@ -120,11 +120,17 @@ class FollowPipeline:
                 self.state = RPFState.SUSPENDED
 
     def _reidentify(self, embeddings: dict):
-        query = self._get_target_embedding()
-        candidate_ids = list(embeddings.keys())
-        best_id, best_sim = self.cmoh.match(query, candidate_ids)
+        # compare each visible track's embedding against the stored target embedding
+        # (cmoh.match only checks known IDs — won't find a reappearing person with a new track ID)
+        target_emb = self._get_target_embedding()
+        best_id, best_sim = None, 0.0
+        for tid, emb in embeddings.items():
+            sim = float(np.dot(emb, target_emb))
+            if sim > best_sim:
+                best_sim = sim
+                best_id = tid
 
-        if best_id is not None:
+        if best_id is not None and best_sim >= self.cmoh.sim_threshold:
             if best_id == self._reid_candidate_id:
                 self._reid_confirm_count += 1
             else:
@@ -133,6 +139,8 @@ class FollowPipeline:
 
             if self._reid_confirm_count >= self._reid_confirm_needed:
                 self.target_id = best_id
+                self.cmoh.register(best_id)
+                self.cmoh.update(best_id, embeddings[best_id])
                 self.state = RPFState.FOLLOWING
                 self._lost_frames = 0
                 self._reid_confirm_count = 0
