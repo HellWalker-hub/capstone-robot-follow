@@ -50,6 +50,11 @@ class FollowPipeline:
         self._lost_frames = 0
         self._lost_threshold = cfg.get("lost_threshold", 20)
 
+        # FPS optimisation: only run ReID every N frames during FOLLOWING
+        # tracker handles identity by bbox overlap in between
+        self._reid_every_n = cfg.get("reid_every_n", 3)
+        self._frame_counter = 0
+
         # re-id requires N consecutive frames above threshold before confirming
         self._reid_confirm_count = 0
         self._reid_confirm_needed = cfg.get("reid_confirm_frames", 5)
@@ -122,18 +127,26 @@ class FollowPipeline:
             result["state"] = self.state
             return result
 
-        track_embeddings = {}
-        for track in tracks:
-            tid = int(track[4])
-            track_embeddings[tid] = self.reid.extract(frame, track[:4])
+        self._frame_counter += 1
+        run_reid = (self._frame_counter % self._reid_every_n == 0)
 
         if self.state == RPFState.REGISTERING:
             self._register(frame, tracks)
         elif self.state == RPFState.IDENTIFICATION:
+            # always run ReID during identification
+            track_embeddings = self._extract_all(frame, tracks)
             self._identify(track_embeddings)
         elif self.state == RPFState.FOLLOWING:
-            self._follow(track_embeddings)
+            if run_reid:
+                # single full-body crop only during stable following — fastest path
+                track_embeddings = self._extract_all(frame, tracks, head_crop=False)
+                self._follow(track_embeddings)
+            else:
+                # tracker-only frame: just check target is still present
+                self._follow_trackonly(tracks)
         elif self.state in (RPFState.SUSPENDED, RPFState.REIDENTIFICATION):
+            # always run full dual-crop ReID when searching for target
+            track_embeddings = self._extract_all(frame, tracks, head_crop=True)
             self._update_occluders(track_embeddings)
             self._reidentify(track_embeddings)
 
@@ -152,6 +165,39 @@ class FollowPipeline:
     # ------------------------------------------------------------------
     # State handlers
     # ------------------------------------------------------------------
+
+    def _extract_all(self, frame: np.ndarray, tracks: np.ndarray,
+                     head_crop: bool = True) -> dict:
+        """Extract embeddings for all tracks. head_crop=False skips dual-crop (faster)."""
+        embeddings = {}
+        orig_hw = self.reid.head_weight
+        orig_bw = self.reid.body_weight
+        if not head_crop:
+            # temporarily disable head weighting — single full-body forward pass
+            self.reid.head_weight = 0.0
+            self.reid.body_weight = 1.0
+        for track in tracks:
+            tid = int(track[4])
+            embeddings[tid] = self.reid.extract(frame, track[:4])
+        if not head_crop:
+            self.reid.head_weight = orig_hw
+            self.reid.body_weight = orig_bw
+        return embeddings
+
+    def _follow_trackonly(self, tracks: np.ndarray):
+        """Tracker-only frame: check target presence without ReID inference."""
+        current_ids = {int(t[4]) for t in tracks}
+        if self.target_id in current_ids:
+            self._lost_frames = 0
+        else:
+            self._lost_frames += 1
+            if self._lost_frames >= self._lost_threshold:
+                current_embeddings = {}  # no embeddings available
+                self._continuously_visible = set()
+                self._reid_confirm_count = 0
+                self._reid_candidate_id = None
+                print("[Pipeline] Target lost → SUSPENDED")
+                self.state = RPFState.SUSPENDED
 
     def _register(self, frame: np.ndarray, tracks: np.ndarray):
         if len(tracks) == 0:
