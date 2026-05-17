@@ -22,7 +22,7 @@ STATE_COLORS = {
 }
 
 clicked_point = None
-target_thumbnail = None  # stores last known crop of registered target
+target_thumbnail = None
 
 
 def mouse_callback(event, x, y, flags, param):
@@ -57,7 +57,7 @@ def draw_overlay(frame, result, pipeline=None):
         if is_target:
             c, thickness = (0, 255, 0), 3
         elif is_occluder:
-            c, thickness = (0, 128, 255), 2   # orange = excluded occluder
+            c, thickness = (0, 128, 255), 2
         else:
             c, thickness = (180, 180, 180), 1
 
@@ -87,7 +87,6 @@ def draw_overlay(frame, result, pipeline=None):
         prog = pipeline.registration_progress
         bar_w = 300
         filled = int(bar_w * prog)
-        # bar colour: yellow → green once min frames reached
         bar_color = (0, 220, 80) if pipeline.registration_ready else (255, 200, 0)
         cv2.rectangle(frame, (5, 40), (5 + bar_w, 58), (60, 60, 60), -1)
         cv2.rectangle(frame, (5, 40), (5 + filled, 58), bar_color, -1)
@@ -101,7 +100,6 @@ def draw_overlay(frame, result, pipeline=None):
         cv2.putText(frame, f"Searching... threshold={thresh:.2f}", (5, 55),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
 
-    # target thumbnail — bottom-left corner
     if target_thumbnail is not None:
         h, w = frame.shape[:2]
         th, tw = target_thumbnail.shape[:2]
@@ -150,10 +148,9 @@ def main():
             bbox = find_bbox_at_click(result["all_tracks"], clicked_point)
             if bbox is not None:
                 pipeline.register_target(frame, bbox)
-                # save thumbnail of registered target
                 global target_thumbnail
                 x1, y1, x2, y2 = map(int, bbox[:4])
-                crop = frame[max(0,y1):y2, max(0,x1):x2]
+                crop = frame[max(0, y1):y2, max(0, x1):x2]
                 if crop.size > 0:
                     target_thumbnail = cv2.resize(crop, (80, 160))
             else:

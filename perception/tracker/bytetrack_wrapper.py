@@ -12,7 +12,7 @@ class PersonTracker:
     occluder exclusion set and can't bypass it by getting a new ID.
     """
 
-    def __init__(self, model_path="yolov8n.pt", conf=0.4, device=None,
+    def __init__(self, model_path="yolo26n.pt", conf=0.4, device=None,
                  track_buffer=90):
         import torch
         if device is None:
@@ -26,7 +26,7 @@ class PersonTracker:
         self.model = YOLO(model_path)
         self.conf = conf
         self._tracker_config = self._make_tracker_config(track_buffer)
-        print(f"[Tracker] YOLOv8n + ByteTrack on {device} (track_buffer={track_buffer})")
+        print(f"[Tracker] YOLO26n + ByteTrack on {device} (track_buffer={track_buffer})")
 
     def _make_tracker_config(self, track_buffer: int) -> str:
         """Write a custom bytetrack config with the requested track_buffer."""

@@ -1,5 +1,6 @@
 import numpy as np
 from enum import Enum
+from collections import deque
 
 from perception.tracker.bytetrack_wrapper import PersonTracker
 from perception.reid.osnet_reid import OSNetReID
@@ -76,6 +77,11 @@ class FollowPipeline:
         # CMOH update gate: only update during following if sim to initial is high
         self._cmoh_update_threshold = cfg.get("cmoh_update_threshold", 0.70)
 
+        # runtime diversity buffer — grows during FOLLOWING, feeds CMOH mean
+        # _initial_embedding is never touched; this only enriches CMOH appearance memory
+        _buf_max = cfg.get("runtime_buffer_max", 100)
+        self._runtime_buffer: deque = deque(maxlen=_buf_max)
+
         # UI
         self.registration_progress: float = 0.0
         self.registration_ready: bool = False
@@ -97,6 +103,7 @@ class FollowPipeline:
         self.registration_ready = False
         self.cmoh.clear()
         self._initial_embedding = None
+        self._runtime_buffer.clear()
         self.target_id = None
         self._continuously_visible.clear()
         self._reid_confirm_count = 0
@@ -259,7 +266,13 @@ class FollowPipeline:
             emb = embeddings[self.target_id]
             sim_to_initial = float(np.dot(emb, self._initial_embedding))
             if sim_to_initial >= self._cmoh_update_threshold:
-                self.cmoh.update(self.target_id, emb)
+                # grow runtime buffer with diverse frames collected during following
+                if self._is_diverse_runtime(emb):
+                    self._runtime_buffer.append(emb.copy())
+                # feed CMOH the buffer mean — richer coverage than raw single frame
+                cmoh_emb = self._compute_mean(list(self._runtime_buffer)) \
+                           if self._runtime_buffer else emb
+                self.cmoh.update(self.target_id, cmoh_emb)
         else:
             self._lost_frames += 1
             if self._lost_frames >= self._lost_threshold:
@@ -343,6 +356,12 @@ class FollowPipeline:
         if self._reg_current_mean is None:
             return True
         return (1.0 - float(np.dot(emb, self._reg_current_mean))) > self._diversity_threshold
+
+    def _is_diverse_runtime(self, emb: np.ndarray) -> bool:
+        if not self._runtime_buffer:
+            return True
+        buf_mean = self._compute_mean(list(self._runtime_buffer))
+        return (1.0 - float(np.dot(emb, buf_mean))) > self._diversity_threshold
 
     @staticmethod
     def _compute_mean(embeddings: list) -> np.ndarray:
