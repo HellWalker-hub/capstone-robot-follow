@@ -38,4 +38,4 @@ python scripts/run_perception.py --source 0  # webcam
 
 - **Prototype:** MacBook M1 Air (offboard compute)
 - **Robot:** TurtleBot3 Burger + RPi 4 (ROS2 Humble)
-- **Future:** NVIDIA Jetson Nano (onboard compute)
+- **Future:** NVIDIA Jetson Orin Nano (onboard compute)
