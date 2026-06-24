@@ -1,0 +1,103 @@
+"""
+Drop-in PersonTracker (v2): Hailo YOLOv8s-Pose + standalone PyPI bytetracker.
+Same .update(frame) -> Nx6 [x1,y1,x2,y2,id,conf] interface,
+PLUS .get_keypoints(track_id) -> (17, 3) [x, y, conf] in image coords.
+"""
+import numpy as np
+import torch
+from bytetracker import BYTETracker
+
+from perception.detector.hailo_pose import HailoPoseDetector, NUM_KEYPOINTS
+
+
+def _iou(a, b):
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1 = max(ax1, bx1); iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2); iy2 = min(ay2, by2)
+    iw = max(0.0, ix2 - ix1); ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0: return 0.0
+    aa = (ax2 - ax1) * (ay2 - ay1)
+    bb = (bx2 - bx1) * (by2 - by1)
+    return inter / (aa + bb - inter + 1e-6)
+
+
+class PersonTracker:
+    def __init__(self, model_path=None, conf=0.4, device=None,
+                 track_buffer=90,
+                 hef_path="/home/capstone/hailo_demo/models/yolov8s_pose.hef"):
+        self.detector = HailoPoseDetector(hef_path=hef_path, conf=conf)
+        self._track_buffer = track_buffer
+        self.tracker = BYTETracker(
+            track_thresh=0.5,
+            track_buffer=track_buffer,
+            match_thresh=0.8,
+            frame_rate=30,
+        )
+        self._keypoints_by_id: dict = {}
+        print(f"[Tracker-v2] HailoPoseDetector + ByteTracker (track_buffer={track_buffer})")
+
+    def update(self, frame: np.ndarray) -> np.ndarray:
+        det = self.detector.detect_with_keypoints(frame)
+        dets = det["boxes"]            # (N, 5)
+        kpts = det["keypoints"]        # (N, 17, 3)
+
+        if len(dets) == 0:
+            try:
+                self.tracker.update(torch.zeros((0, 6), dtype=torch.float32), None)
+            except Exception:
+                pass
+            self._keypoints_by_id.clear()
+            return np.empty((0, 6), dtype=np.float32)
+
+        # Build 6-col input for bytetracker: [x1,y1,x2,y2,conf,class=0]
+        bt_in = np.zeros((len(dets), 6), dtype=np.float32)
+        bt_in[:, :4] = dets[:, :4]
+        bt_in[:, 4]  = dets[:, 4]
+        bt_in[:, 5]  = 0
+
+        online = self.tracker.update(torch.from_numpy(bt_in), None)
+        if online is None or len(online) == 0:
+            self._keypoints_by_id.clear()
+            return np.empty((0, 6), dtype=np.float32)
+
+        online = np.asarray(online, dtype=np.float32)
+
+        # Build Nx6 output matching v1 contract: [x1,y1,x2,y2,id,conf]
+        out = np.zeros((len(online), 6), dtype=np.float32)
+        out[:, 0:4] = online[:, 0:4]
+        out[:, 4]   = online[:, 4]
+
+        # Match each track back to source detection by IoU to:
+        #   1) attach keypoints
+        #   2) get original detection confidence
+        new_kpts_map = {}
+        for i, trk in enumerate(out):
+            best_iou, best_idx, best_conf = 0.0, -1, 1.0
+            for di, d in enumerate(dets):
+                iou = _iou(trk[:4], d[:4])
+                if iou > best_iou:
+                    best_iou, best_idx, best_conf = iou, di, float(d[4])
+            out[i, 5] = best_conf
+            if best_idx >= 0 and best_iou > 0.3:
+                tid = int(trk[4])
+                new_kpts_map[tid] = kpts[best_idx].copy()
+
+        self._keypoints_by_id = new_kpts_map
+        return out
+
+    def get_keypoints(self, track_id: int) -> np.ndarray | None:
+        return self._keypoints_by_id.get(track_id)
+
+    def get_all_keypoints(self) -> dict:
+        return dict(self._keypoints_by_id)
+
+    def reset(self):
+        self.tracker = BYTETracker(
+            track_thresh=0.5,
+            track_buffer=self._track_buffer,
+            match_thresh=0.8,
+            frame_rate=30,
+        )
+        self._keypoints_by_id.clear()

@@ -6,7 +6,7 @@ import numpy as np
 class PersonDetector:
     """YOLOv8n person detector with M1 MPS or CPU fallback."""
 
-    def __init__(self, model_path="yolov8n.pt", conf=0.4, device=None):
+    def __init__(self, model_path="yolo26n.pt", conf=0.4, device=None):
         if device is None:
             if torch.backends.mps.is_available():
                 device = "mps"

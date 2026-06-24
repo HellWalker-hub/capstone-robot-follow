@@ -1,9 +1,15 @@
 import numpy as np
 from enum import Enum
-from collections import deque
 
-from perception.tracker.bytetrack_wrapper import PersonTracker
-from perception.reid.osnet_reid import OSNetReID
+import os
+if os.environ.get("USE_HAILO", "0") == "1":
+    from perception.tracker.hailo_yolo_tracker import PersonTracker
+else:
+    from perception.tracker.bytetrack_wrapper import PersonTracker
+if os.environ.get("USE_HAILO", "0") == "1":
+    from perception.reid.hailo_reid import OSNetReID
+else:
+    from perception.reid.osnet_reid import OSNetReID
 from perception.occlusion.cmoh import CMOH
 
 
@@ -14,6 +20,7 @@ class RPFState(Enum):
     FOLLOWING = "following"
     SUSPENDED = "suspended"
     REIDENTIFICATION = "reidentification"
+    BLIND_CHASE = "blind_chase"
 
 
 class FollowPipeline:
@@ -77,10 +84,31 @@ class FollowPipeline:
         # CMOH update gate: only update during following if sim to initial is high
         self._cmoh_update_threshold = cfg.get("cmoh_update_threshold", 0.70)
 
-        # runtime diversity buffer — grows during FOLLOWING, feeds CMOH mean
-        # _initial_embedding is never touched; this only enriches CMOH appearance memory
-        _buf_max = cfg.get("runtime_buffer_max", 100)
-        self._runtime_buffer: deque = deque(maxlen=_buf_max)
+        # blind-chase: keep moving briefly after losing target
+        self._blind_chase_frames = 0
+        self._blind_chase_max = cfg.get("blind_chase_frames", 180)
+        # Stage thresholds (frames into blind-chase)
+        self._bc_grace_end   = cfg.get("bc_grace_end",   30)   # 0–30: glide, no search
+        self._bc_lidar_end   = cfg.get("bc_lidar_end",   60)   # 30–60: lidar only
+        self._bc_gated_end   = cfg.get("bc_gated_end",  120)   # 60–120: camera re-ID, narrow gate
+        # 120–blind_chase_max: gate expanding
+        # Gate sizes
+        self._gate_px_init   = cfg.get("gate_px_init", 200)    # ±px around last bbox center
+        self._gate_px_max    = cfg.get("gate_px_max",  400)
+        self._gate_rad_init  = cfg.get("gate_rad_init", 0.26)  # ±15° in radians
+        self._gate_rad_max   = cfg.get("gate_rad_max",  0.52)  # ±30°
+        # Last known target anchor (set on FOLLOWING → BLIND_CHASE)
+        self._last_target_px_x = None
+        self._last_target_lidar_ang = None
+        self._last_target_lidar_dist = None
+        # Lidar blob result (set during stage 1, read by runner)
+        self.lidar_blob_angle = None
+        self.lidar_blob_dist  = None
+        # Max bbox-center jump per frame allowed in FOLLOWING (px)
+        # If bbox jumps further than this, treat as a hijack -> lose target
+        self._max_bbox_jump_px = cfg.get("max_bbox_jump_px", 150)
+        self._last_bbox_cx = None
+        self._last_bbox_cy = None
 
         # UI
         self.registration_progress: float = 0.0
@@ -103,7 +131,6 @@ class FollowPipeline:
         self.registration_ready = False
         self.cmoh.clear()
         self._initial_embedding = None
-        self._runtime_buffer.clear()
         self.target_id = None
         self._continuously_visible.clear()
         self._reid_confirm_count = 0
@@ -151,6 +178,14 @@ class FollowPipeline:
             else:
                 # tracker-only frame: just check target is still present
                 self._follow_trackonly(tracks)
+        elif self.state == RPFState.BLIND_CHASE:
+            self._blind_chase_frames += 1
+            if self._blind_chase_frames >= self._blind_chase_max:
+                print("[Pipeline] Blind-chase expired -> SUSPENDED")
+                self.state = RPFState.SUSPENDED
+            else:
+                track_embeddings = self._extract_all(frame, tracks, head_crop=True)
+                self._reidentify(track_embeddings)
         elif self.state in (RPFState.SUSPENDED, RPFState.REIDENTIFICATION):
             # always run full dual-crop ReID when searching for target
             track_embeddings = self._extract_all(frame, tracks, head_crop=True)
@@ -199,12 +234,12 @@ class FollowPipeline:
         else:
             self._lost_frames += 1
             if self._lost_frames >= self._lost_threshold:
-                current_embeddings = {}  # no embeddings available
                 self._continuously_visible = set()
                 self._reid_confirm_count = 0
                 self._reid_candidate_id = None
-                print("[Pipeline] Target lost → SUSPENDED")
-                self.state = RPFState.SUSPENDED
+                self._blind_chase_frames = 0
+                print("[Pipeline] Target lost → BLIND_CHASE")
+                self.state = RPFState.BLIND_CHASE
 
     def _register(self, frame: np.ndarray, tracks: np.ndarray):
         if len(tracks) == 0:
@@ -266,24 +301,19 @@ class FollowPipeline:
             emb = embeddings[self.target_id]
             sim_to_initial = float(np.dot(emb, self._initial_embedding))
             if sim_to_initial >= self._cmoh_update_threshold:
-                # grow runtime buffer with diverse frames collected during following
-                if self._is_diverse_runtime(emb):
-                    self._runtime_buffer.append(emb.copy())
-                # feed CMOH the buffer mean — richer coverage than raw single frame
-                cmoh_emb = self._compute_mean(list(self._runtime_buffer)) \
-                           if self._runtime_buffer else emb
-                self.cmoh.update(self.target_id, cmoh_emb)
+                self.cmoh.update(self.target_id, emb)
         else:
             self._lost_frames += 1
             if self._lost_frames >= self._lost_threshold:
-                # defensive: exclude target's own ID in case of brief flicker
                 self._continuously_visible = (
                     set(embeddings.keys()) - {self.target_id}
                 )
                 self._reid_confirm_count = 0
                 self._reid_candidate_id = None
-                print("[Pipeline] Target lost → SUSPENDED")
-                self.state = RPFState.SUSPENDED
+                self._blind_chase_frames = 0
+                # anchor is already set by _follow recording — keep it
+                print(f"[Pipeline] Target lost → BLIND_CHASE (anchor px_x={self._last_target_px_x})")
+                self.state = RPFState.BLIND_CHASE
 
     def _update_occluders(self, embeddings: dict):
         self._continuously_visible &= set(embeddings.keys())
@@ -342,6 +372,11 @@ class FollowPipeline:
                 self._continuously_visible.clear()
                 self._reid_confirm_count = 0
                 self._reid_candidate_id = None
+                self._blind_chase_frames = 0
+                self.state = RPFState.BLIND_CHASE
+        elif self.state == RPFState.BLIND_CHASE:
+            self._blind_chase_frames += 1
+            if self._blind_chase_frames >= self._blind_chase_max:
                 self.state = RPFState.SUSPENDED
 
     # ------------------------------------------------------------------
@@ -357,11 +392,6 @@ class FollowPipeline:
             return True
         return (1.0 - float(np.dot(emb, self._reg_current_mean))) > self._diversity_threshold
 
-    def _is_diverse_runtime(self, emb: np.ndarray) -> bool:
-        if not self._runtime_buffer:
-            return True
-        buf_mean = self._compute_mean(list(self._runtime_buffer))
-        return (1.0 - float(np.dot(emb, buf_mean))) > self._diversity_threshold
 
     @staticmethod
     def _compute_mean(embeddings: list) -> np.ndarray:
