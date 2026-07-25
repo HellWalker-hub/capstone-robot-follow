@@ -1,10 +1,12 @@
-# Cap-Marker Identity System (v3) — separate approach
+# Cap-Marker Identity System (v3)
 
-This branch (`cap-marker-v3`, tag `cap-system-v3`) adds a **marker-cap identity gate** on
-top of the appearance-based ReID baseline. It does **not** replace the original approach on
-`main`; it is a parallel, separable implementation.
+This is the current, final identity system used by the robot: a **marker-cap identity
+gate** layered on top of the appearance-based ReID baseline described in the main
+[`README.md`](README.md). It was developed on a separate branch (`cap-marker-v3`, tag
+`cap-system-v3`, preserved in git history) and has since been merged into `main` as the
+submitted implementation. See the main README for the full project overview.
 
-## What's new vs the baseline (`main`)
+## What it adds on top of the ReID baseline
 - `perception/cap_detector.py` — HSV orange-cap detector (head-region orange fraction).
 - `perception/pipeline_v2.py` — identity gate wired into `_identify` / `_reidentify`, plus a
   continuous `_cap_correction()` during FOLLOWING (cap = hard veto when visible; appearance
