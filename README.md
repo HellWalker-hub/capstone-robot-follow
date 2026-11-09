@@ -17,9 +17,7 @@ Senior capstone project, Abu Dhabi University, 2025-26.
 The same recorded clip run through two identity policies (the offline ablation described under
 [Results](#results)). Left: appearance re-identification only, locked onto a look-alike in a
 white kandoora. Right: with the cap gate, the lock stays on the person in the orange cap. The
-overlays come from the offline evaluation script, not the robot's own display. The full
-two-minute comparison is attached to the
-[demo-media release](https://github.com/HellWalker-hub/capstone-robot-follow/releases/tag/demo-media).
+overlays come from the offline evaluation script, not the robot's own display.
 
 ## The problem and what we found
 
