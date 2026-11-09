@@ -25,7 +25,7 @@ class RPFState(Enum):
     BLIND_CHASE = "blind_chase"
 
 
-ATTRIBUTE_THRESHOLD = 0.85   # cosine sim floor for PA-100K attributes
+ATTRIBUTE_THRESHOLD = 0.85   # cosine sim floor for PETA attribute vectors
 ATTR_WEIGHT = 0.4            # combined = 0.6*appearance + 0.4*attributes
 APPEARANCE_WEIGHT = 0.6
 
@@ -41,7 +41,9 @@ CAP_CONFIRM_FRAMES = 2       # consecutive cap-gated frames before locking (anti
 
 class FollowPipeline:
     """
-    Perception pipeline: YOLOv8+ByteTrack → ReID → CMOH occlusion memory.
+    Perception pipeline: detector + ByteTrack -> ReID (+ PETA attributes) -> cap
+    identity gate -> CMOH occlusion memory. With USE_HAILO=1 the detector is YOLOv11n
+    on the Hailo-8L; otherwise it is the Ultralytics CPU/MPS path.
 
     Key design decisions:
     - Re-id ALWAYS compares against _initial_embedding (diverse registration mean),

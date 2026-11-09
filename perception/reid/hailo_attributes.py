@@ -1,5 +1,6 @@
 """
-Hailo person-attribute extractor (PA-100K, 35 attributes, ResNet18 backbone).
+Hailo person-attribute extractor: person_attr_resnet_v1_18 from the Hailo Model Zoo
+(ResNet-18 backbone, trained on PETA, 35 attributes).
 Extracts a 35-dim attribute probability vector per person crop.
 
 Use for ReID disambiguation: two people with different clothing/accessories
@@ -17,24 +18,8 @@ from hailo_platform import (
 from perception.detector.hailo_backend import HailoBackend
 
 
-# PA-100K canonical attribute names (for debug/logging only)
-ATTR_NAMES = [
-    "Female", "AgeOver60", "Age18-60", "AgeLess18",
-    "Front", "Side", "Back",
-    "Hat", "Glasses",
-    "HandBag", "ShoulderBag", "Backpack",
-    "HoldObjectsInFront",
-    "ShortSleeve", "LongSleeve",
-    "UpperStride", "UpperLogo", "UpperPlaid", "UpperSplice",
-    "LowerStripe", "LowerPattern",
-    "LongCoat",
-    "Trousers", "Shorts", "Skirt&Dress",
-    "Boots",
-    # PA-100K only has 26, but this HEF outputs 35. Extra dims are color
-    # attributes from some extended versions. We don't need labels for math.
-    "Extra27", "Extra28", "Extra29", "Extra30",
-    "Extra31", "Extra32", "Extra33", "Extra34", "Extra35",
-]
+# The 35 outputs follow PETA's standard 35-attribute protocol. The pipeline only
+# compares whole vectors with cosine similarity, so per-dimension labels are not needed.
 
 
 class HailoAttributes:
