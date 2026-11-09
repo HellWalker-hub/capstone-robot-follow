@@ -19,6 +19,7 @@ holds the lock (cap score 0.13) while a look-alike in a white kandoora walks alo
 (cap score 0.00), at about 18 FPS on the Pi 5 and Hailo-8L. This run used a later build than
 the code in this repository, with a newer web UI and a closer follow distance (1.4 to 1.6 m);
 the identity logic shown is the cap gate described below.
+[Watch the full run (57 s) on YouTube](https://youtu.be/uLoE7I1pnIk).
 
 ![Side-by-side comparison: re-ID only locks onto a look-alike, the cap gate stays on the user](docs/media/ab_demo.gif)
 
