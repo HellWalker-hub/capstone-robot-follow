@@ -12,9 +12,17 @@ Senior capstone project, Abu Dhabi University, 2025-26.
 
 ## Demo
 
+![The robot's web UI while following: the user in the orange cap stays locked while a look-alike walks alongside](docs/media/robot_demo.gif)
+
+On the robot: the live web UI while following down a corridor. The person in the orange cap
+holds the lock (cap score 0.13) while a look-alike in a white kandoora walks alongside
+(cap score 0.00), at about 18 FPS on the Pi 5 and Hailo-8L. This run used a later build than
+the code in this repository, with a newer web UI and a closer follow distance (1.4 to 1.6 m);
+the identity logic shown is the cap gate described below.
+
 ![Side-by-side comparison: re-ID only locks onto a look-alike, the cap gate stays on the user](docs/media/ab_demo.gif)
 
-The same recorded clip run through two identity policies (the offline ablation described under
+Offline: the same recorded clip run through two identity policies (the offline ablation described under
 [Results](#results)). Left: appearance re-identification only, locked onto a look-alike in a
 white kandoora. Right: with the cap gate, the lock stays on the person in the orange cap. The
 overlays come from the offline evaluation script, not the robot's own display.
