@@ -1,246 +1,251 @@
 # The Carry My Bag Robot
 
-**Capstone Project — Abu Dhabi University, College of Engineering, B.Sc. Computer Engineering**
+A TurtleBot3 that carries a user's bag and follows them indoors, using only a camera and a
+LiDAR, with every model running on a Raspberry Pi 5 and a Hailo-8L accelerator. Detecting a
+person is a solved problem. Knowing *which* person to follow is not, especially when the
+people around the user are dressed almost exactly like them. This project is about that
+second problem: the robot keeps hold of one registered person through occlusions and
+look-alike bystanders by combining appearance re-identification with a simple, explicit
+identity marker.
 
-An autonomous mobile robot that follows one specific, registered person through a room —
-carrying their belongings hands-free — and keeps following the **right** person even when
-someone else crosses in front, or when bystanders are dressed almost identically to the
-target. This repository is the final submission of the project.
+Senior capstone project, Abu Dhabi University, 2025-26.
 
-**Team:** Muaadh Al Haddad · Haroon Siddiqui · Mohsin Al Hashmi · Saif Almashjari · Talal Almahri
-**Supervisors:** Prof. Mohammed Ghazal · Eng. Yaser Othman
+## Demo
 
----
+> Video and GIF to be added.
 
-## Table of Contents
-1. [The problem](#1-the-problem)
-2. [What the robot does](#2-what-the-robot-does)
-3. [System architecture](#3-system-architecture)
-4. [The cap-marker identity gate](#4-the-cap-marker-identity-gate--the-core-contribution)
-5. [Hardware](#5-hardware)
-6. [Repository structure](#6-repository-structure)
-7. [Setup](#7-setup)
-8. [Running the robot — full walkthrough](#8-running-the-robot--full-walkthrough)
-9. [Results](#9-results)
-10. [Known limitations & future work](#10-known-limitations--future-work)
-11. [Project history / legacy prototype](#11-project-history--legacy-prototype)
+## The problem and what we found
 
----
+The robot follows the user from behind, so it mostly sees their back. In our test
+environment many people wear white kandooras, and from behind two people in white
+kandooras look very similar.
 
-## 1. The Problem
+Our first identity system used appearance re-identification only: an OSNet x1.0 embedding,
+fused with a pedestrian attribute vector, compared against a reference captured when the
+user registered. It worked until someone similar walked between the robot and the user.
+The tracker would briefly lose the user, re-identification would pick the most similar
+person in view, and that was often the wrong one. Once the lock moved, it stayed moved.
 
-Detecting *a* person in a video frame is a solved problem. The hard problem for a
-follow-me robot is deciding **which** person to follow, and never losing track of that
-decision — especially when:
+Our reading of why: the OSNet model we deployed was trained on Market-1501, a dataset of
+pedestrians filmed by campus surveillance cameras. In that kind of data, clothing colour
+and shape are what separate most people, so the embedding leans heavily on them. Two
+people in the same white kandoora, seen from behind, give it very little else to use.
 
-- the target is briefly **occluded** by someone walking in front of the camera, or
-- bystanders are dressed **almost identically** to the target (in our test environment,
-  multiple people in plain white thobes/kandooras).
+**The fix.** The user wears a bright orange cap. For every tracked person we measure the
+fraction of orange pixels (HSV threshold) in the top 16% of their bounding box, which is
+roughly the head. A score of 0.025 or more counts as wearing the cap. When the cap is
+visible:
 
-Appearance-based re-identification alone struggles here: two people in the same outfit
-produce nearly indistinguishable visual embeddings. This project's central engineering
-contribution is a lightweight, appearance-proof solution to that exact failure mode.
+- only the person wearing it can become, or stay, the target. This is a hard veto, so a
+  look-alike cannot win on appearance score;
+- the check runs on every frame while following, not only when re-acquiring. If the lock
+  ever moves to someone else, it moves back within two frames.
 
-## 2. What the Robot Does
+When the cap is not visible, for example when the user turns around, the robot falls back
+to appearance plus attributes.
 
-1. An operator opens a web UI streaming the robot's camera feed and **clicks the person**
-   to follow.
-2. The robot captures several diverse views of that person (turn slowly) to build a
-   robust identity reference.
-3. It then **follows that person at a fixed distance (~2.0–2.3 m)**, turning to keep them
-   centred, using LiDAR to maintain distance and avoid collisions.
-4. If the target is briefly hidden or a look-alike walks past, the robot **does not
-   switch targets** — it holds its lock (or self-corrects onto the right person) and
-   resumes following once the target reappears.
+**Limitations, stated plainly.**
 
-## 3. System Architecture
+- The identity guarantee depends on the user wearing the cap and the cap being visible.
+- The detector checks a colour, not a specific object. Any orange in the head region counts,
+  so two people in orange caps would both pass the gate.
+- The colour threshold was tuned under our indoor lighting and may need re-tuning elsewhere.
+- Tested indoors with one user at a time.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    CAM["USB camera"] --> YOLO["YOLOv11n detector<br/>Hailo-8L"]
+    YOLO --> BT["ByteTrack"]
+    BT --> OSN["OSNet x1.0 embedding<br/>Hailo-8L"]
+    BT --> ATTR["PETA attribute model<br/>Hailo-8L"]
+    BT --> CAP["Cap gate<br/>HSV colour test, CPU"]
+    OSN --> ID["Identity decision<br/>and state machine"]
+    ATTR --> ID
+    CAP --> ID
+    ID --> CTRL["Follow controller<br/>bearing and distance"]
+    LIDAR["LiDAR<br/>custom serial driver"] --> SCAN(["/scan"])
+    SCAN --> CTRL
+    SCAN --> SAFE["LiDAR safety governor"]
+    CTRL -->|"/cmd_vel_raw"| SAFE
+    SAFE -->|"/cmd_vel"| BASE["OpenCR and motors"]
 ```
-Camera → YOLOv11n (Hailo-8L) → ByteTrack ─┬─ OSNet ReID embedding (512-d)
-                                            ├─ PETA attribute vector (35-d)
-                                            └─ Marker-cap detector (HSV, CPU)
-                                                            │
-                                        Identity decision + state machine
-                                                            │  target_id
-                                                 Control law (bearing + distance)
-                                                            │  (linear, angular vel)
-     LiDAR (custom 115200 serial node) → /scan → Safety governor → /cmd_vel → OpenCR → motors
-```
 
-- **Detection & tracking:** YOLOv11n (nano) + ByteTrack, running on-device on the
-  **Hailo-8L** AI accelerator (13 TOPS) — no tethered laptop required.
-- **Re-identification:** an OSNet x1.0 appearance embedding (compiled to a custom Hailo
-  HEF — no pre-built one existed for this accelerator) fused with a 35-attribute
-  pedestrian model (age/gender/clothing-type/carried-items), combined as
-  `0.6 × appearance + 0.4 × attributes`.
-- **Occlusion memory:** track IDs seen continuously since the target was lost are
-  excluded as re-acquisition candidates, and the appearance reference is only updated
-  during high-confidence following — preventing identity drift.
-- **Marker-cap identity gate:** see [§4](#4-the-cap-marker-identity-gate--the-core-contribution).
-- **Control & safety:** proportional control on bearing + LiDAR distance, with an
-  independent LiDAR-based safety governor that overrides any command that would drive
-  the robot into an obstacle.
-- **State machine:** `IDLE → REGISTERING → IDENTIFICATION → FOLLOWING → BLIND_CHASE →
-  SUSPENDED/REIDENTIFICATION → FOLLOWING`. The robot only drives during `FOLLOWING`.
+- **Detection and tracking:** YOLOv11n on the Hailo-8L, with ByteTrack keeping track IDs
+  stable across frames.
+- **Re-identification:** an OSNet x1.0 embedding (512-d) and a 35-attribute PETA vector,
+  combined as 0.6 x appearance + 0.4 x attributes and compared with a reference that is
+  captured from several views during registration and never updated afterwards, so a wrong
+  match cannot drift the reference.
+- **Occlusion handling:** when the user is lost, people who were visible at that moment are
+  treated as the likely occluders and excluded from re-acquisition.
+- **State machine:** idle, registering, identification, following, blind chase, suspended,
+  re-identification. The robot only drives while following, plus a short decaying coast
+  after losing the user.
+- **Follow controller:** turns toward the user's bounding box and holds a distance of 2.0 to
+  2.3 m, measured with the LiDAR along the user's bearing.
+- **Safety governor:** a separate ROS 2 node that watches a ±30° cone in front of the robot,
+  scales forward speed down below 0.60 m and stops it below 0.30 m. It never steers.
 
-## 4. The Cap-Marker Identity Gate — the core contribution
+More detail, including file-by-file notes, is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-Appearance and attributes alone cannot reliably separate two people wearing the same
-outfit. To solve this without adding extra hardware, the target optionally wears a
-**bright-orange marker cap** (with a white number panel) on the back of their head —
-exactly where the robot's camera sees it while following from behind.
+## Hardware and software
 
-- A lightweight HSV colour detector measures the fraction of orange in the head region
-  of every detected person, every frame.
-- **When the cap is visible, only the cap-wearing track is eligible to be — or remain —
-  the target.** A look-alike bystander without the cap can never be selected, no matter
-  how similar their appearance embedding is.
-- This check runs **continuously during FOLLOWING**, not only when re-acquiring a lost
-  target: if the robot is ever mistakenly locked onto the wrong person, the gate
-  self-corrects back onto the cap-wearer within a couple of frames.
-- When the cap is not visible (e.g. the target turns to face the camera), the system
-  **falls back to appearance + attribute ReID** as a bridge — so the robot still keeps
-  following, just without the extra veto.
-
-See [`CAP_SYSTEM.md`](CAP_SYSTEM.md) for the file-by-file breakdown of this feature.
-
-## 5. Hardware
-
-| Component | Role |
+| Component | Detail |
 |---|---|
-| TurtleBot3 Burger + OpenCR | Mobile base, motor control, IMU/odometry |
-| Raspberry Pi 5 (Ubuntu 24.04) | Main computer — runs ROS2 + all perception |
-| Hailo-8L AI HAT (13 TOPS) | On-device inference for YOLOv11n, OSNet, attribute model |
-| USB webcam (UGREEN) | RGB perception input |
-| LDROBOT 360° LiDAR | Distance keeping + obstacle safety |
-| Marker cap (orange, printed number) | Appearance-proof target identity marker |
+| Robot base | TurtleBot3 Burger with OpenCR. Stock wheels replaced with 113 mm wheels for higher top speed |
+| Computer | Raspberry Pi 5, Ubuntu 24.04 |
+| Accelerator | Hailo-8L AI HAT (13 TOPS), HailoRT 4.20.0 |
+| Camera | UGREEN USB webcam |
+| LiDAR | LDROBOT 360° LiDAR (LDS-02 form factor) |
+| Middleware | ROS 2 Jazzy, CycloneDDS |
+| Models | YOLOv11n, OSNet x1.0, person_attr_resnet_v1_18 (PETA), all as precompiled Hailo HEF files |
 
-All perception, decision-making, and control run **on the robot itself** — there is no
-tethered laptop in the loop.
+Everything runs on the robot. There is no laptop in the loop.
 
-## 6. Repository Structure
+## Results
+
+All numbers below were measured, but please read how before quoting them.
+
+**On the robot.** These were read from the app's own on-screen telemetry while replaying
+screen recordings of real runs, not from a per-frame log.
+
+| Measure | Result |
+|---|---|
+| Perception loop rate (app FPS counter) | about 17.6 FPS on average, 16.4 to 18.0 observed |
+| Cap score, person wearing the cap | 0.06 to 0.18 |
+| Cap score, everyone else | 0.00 to 0.02 (threshold 0.025) |
+| Wrong-person locks in about 10 min of multi-person runs (3 runs) | none confirmed; 1 frame was ambiguous |
+| Recovery after a full occlusion (1 event) | back on the correct person after about 9 s |
+
+**Offline ablation: re-identification with and without the cap gate.** The same recorded
+video (6,307 frames, about 105 s, in which the cap was visible) was run through two identity
+policies side by side: appearance re-identification only, and the same plus the cap gate.
+
+| Measure | Re-ID only | With cap gate |
+|---|---|---|
+| Frames locked on the correct person | 58.6% | 81.5% |
+| Frames locked on a different person | 32.6% | 4.1% |
+| Sustained wrong locks (held 0.3 s or longer) | 12 | 4 |
+| Longest wrong lock | 11.6 s | 0.6 s |
+| Total time on the wrong person | 34.3 s | 4.3 s |
+
+The cap gate cut time on the wrong person by about 87%. It did not reach zero. Caveats: this
+ran offline on a single clip using desktop models (YOLO11n through Ultralytics, and OSNet
+x1.0 with ImageNet weights rather than a re-ID checkpoint), without the attribute model,
+and "correct person" is defined by the cap detector itself, which favours the cap policy.
+
+## What we tried that did not work
+
+- **MobileNetV3 for re-identification** on the first laptop prototype. It could not separate
+  people in similar clothing. Replaced with YoutuReID, then with OSNet on the robot.
+- **Running perception on a laptop** and sending commands to the robot over Wi-Fi. Replaced
+  by running everything on the Pi and the Hailo-8L.
+- **RepVGG-A0 re-identification on the Hailo.** Replaced with OSNet x1.0, which scores higher
+  on Market-1501.
+- **Checking the cap only when re-acquiring the user.** A look-alike crossing in front could
+  take the lock while the cap was briefly hidden, and keep it. Checking every frame fixed it.
+- **Detecting the cap's white number panel** as a second cue. White walls and white kandoora
+  made it useless, so the gate uses orange only.
+- **The stock LiDAR driver.** It opened the serial port at 230400 baud, but this unit talks at
+  115200, so `/scan` stayed empty with no error. We wrote our own driver. The standard
+  checksum also rejected about 96% of valid packets on this unit, so it checks packet
+  structure instead.
+
+We also considered RF-DETR (a transformer detector) and a UWB radio tag. We did not adopt
+RF-DETR because it improves detection, not identity, and fits the Hailo-8L poorly. A UWB tag
+would identify the user without needing line of sight, but needs radio hardware the Pi does
+not have.
+
+## How to run it
+
+**Tested on:** Raspberry Pi 5 with Ubuntu 24.04 (kernel 6.8 raspi), ROS 2 Jazzy,
+HailoRT 4.20.0, TurtleBot3 Burger. The laptop demo was run on macOS with Python 3.13.
+
+### On the robot
+
+1. Install ROS 2 Jazzy and the TurtleBot3 packages, with `TURTLEBOT3_MODEL=burger`.
+2. Install HailoRT 4.20.0, its PCIe driver and its Python bindings from the Hailo SDK, into
+   a virtual environment. After an Ubuntu kernel update the driver must be rebuilt for the
+   new kernel, otherwise the camera feed stays black:
+   ```bash
+   sudo apt install linux-headers-$(uname -r)
+   sudo dkms install hailo_pci/4.20.0 -k $(uname -r)
+   ```
+3. Models. We used precompiled HEF files for `hailo8l` from the Hailo Model Zoo (the
+   attribute model came from Model Zoo v2.15.0) rather than compiling our own:
+   `yolov11n.hef`, `osnet_x1_0.hef`, `person_attr_resnet_v1_18.hef`. The code currently
+   expects them in `/home/capstone/hailo_demo/models/`.
+4. Copy the files in `deploy/` to the robot's home directory. `deploy/robot_v3.sh` expects
+   them there and runs the perception code from `~/capstone-robot-follow-cap`.
+5. Start everything inside tmux. The launcher stops all services when its terminal closes, so
+   a plain SSH session that drops will stop the robot:
+   ```bash
+   tmux new -s robot 'bash ~/robot_v3.sh'
+   ```
+6. Open `http://<robot-ip>:5000`, click the person wearing the cap, and have them turn slowly
+   for a few seconds so the robot captures several views.
+
+### On a laptop (no robot)
+
+This runs the earlier pipeline (no cap gate, YoutuReID on the CPU) on a webcam:
+
+```bash
+pip install -r requirements.txt
+python scripts/download_weights.py
+python scripts/run_perception.py
+```
+
+### Known issues
+
+- The LiDAR driver and the camera use opposite angle conventions. In
+  `run_perception_hailo_v3.py` the camera bearing goes to the LiDAR lookup without being
+  negated, so when the user is off to one side, the follow distance is read from the other
+  side. It is correct when the user is straight ahead. A fix was made on the robot later but
+  never committed, and we cannot test a change without the robot.
+- `deploy/safety_node.py` republishes the last command it received at 30 Hz with no timeout.
+  If the upstream stops sending, the robot keeps its last velocity until the node is stopped.
+- Model paths and the launcher's working directory are hardcoded for our robot.
+- `deploy/robot_v2.sh` points to a script that is not in this repository.
+
+## Repository layout
 
 ```
 perception/
-├── pipeline_v2.py            — CURRENT state machine + cap identity gate (use this)
-├── pipeline.py                — legacy pipeline (pre-cap-gate)
-├── cap_detector.py            — the marker-cap HSV detector
-├── detector/                  — YOLO wrappers (hailo_yolo.py = current on-device detector)
-├── reid/                      — OSNet + attribute extractors (hailo_osnet.py, hailo_attributes.py)
-├── tracker/                   — ByteTrack wrappers (hailo_yolo_tracker.py = current)
-├── occlusion/                 — CMOH occlusion-memory module
-└── analysis/                  — body-proportion helpers
-
+  pipeline_v2.py       identity state machine with the cap gate (used on the robot)
+  pipeline.py          earlier state machine without the cap gate (laptop demo)
+  cap_detector.py      orange-cap HSV detector
+  detector/            YOLO wrappers; hailo_yolo.py is the robot's detector
+  tracker/             ByteTrack wrappers; hailo_yolo_tracker.py is the robot's tracker
+  reid/                hailo_osnet.py, hailo_attributes.py (robot); osnet_reid.py (laptop)
+  occlusion/           occlusion memory
 scripts/
-├── run_perception_hailo_v3.py — CURRENT entry point (cap system, on-device inference)
-├── run_perception_hailo.py    — earlier on-device version (pre-cap-gate)
-└── run_perception*.py, test_original.py, run_robot.py — earlier/legacy entry points
-
-deploy/                        — scripts that run directly on the Pi (outside the python package)
-├── robot_v3.sh                 — CURRENT launcher: starts the full cap-system stack
-├── robot_v2.sh, robot.sh       — earlier launchers, kept for reference/rollback
-├── lidar_serial_scan.py       — custom LiDAR driver (see note below — this is a real fix)
-├── safety_node.py              — LiDAR-based obstacle safety governor
-├── cmd_vel_relay.py            — UDP → ROS2 velocity bridge
-└── lidar_bridge.py             — /scan → UDP bridge for the perception overlay
-
-ros2_ws/                        — an EARLIER, offboard-processing prototype (see §11) — not
-                                   part of the current on-board system, kept for history
-
-CAP_SYSTEM.md                   — detailed breakdown of the cap-marker feature
-requirements.txt                — Python deps for the legacy laptop-side prototype (§11)
+  run_perception_hailo_v3.py   robot entry point (cap gate, web UI, controller)
+  run_perception_hailo.py      earlier robot entry point, before the cap gate
+  run_perception.py            laptop webcam demo
+  download_weights.py          downloads the laptop re-ID weights
+deploy/
+  robot_v3.sh          starts the full robot stack
+  lidar_serial_scan.py our LiDAR driver (115200 baud)
+  safety_node.py       LiDAR safety governor
+  cmd_vel_relay.py     forwards perception velocity commands into ROS 2
+  lidar_bridge.py      forwards /scan to the perception process
+ros2_ws/               the first prototype's ROS 2 package (laptop over Wi-Fi), kept for history
+docs/ARCHITECTURE.md   design notes
 ```
 
-> **Note on the LiDAR driver:** the LiDAR unit on this robot speaks the LDROBOT `0x54`
-> protocol at **115200 baud**, not the 230400 baud the stock TurtleBot3 `ld08_driver`
-> assumes. `deploy/lidar_serial_scan.py` is a custom node that reads the sensor at the
-> correct baud rate and publishes a standard ROS2 `LaserScan`; `robot_v3.sh` disables the
-> stock driver and starts this one instead. Without this fix, `/scan` never publishes and
-> the robot loses its LiDAR-based safety distance entirely.
+## Team
 
-## 7. Setup
+Senior capstone, B.Sc. Computer Engineering, College of Engineering, Abu Dhabi University.
 
-The current system runs entirely on the Raspberry Pi 5 inside a Hailo-enabled Python
-environment (referred to as `hailo_env` on the robot), which includes the Hailo Runtime
-(HailoRT) and Python bindings provided by the Hailo SDK, plus:
-```
-opencv-python
-numpy
-```
-Model files (HEFs for YOLOv11n, OSNet, and the attribute model) are **not** committed to
-this repository (see `.gitignore`) — they are binary artifacts stored on the robot itself.
-The OSNet HEF in particular was custom-compiled for the Hailo-8L via the Hailo Dataflow
-Compiler, since no pre-built version exists for this accelerator.
+- **Muaadh Al-Haddad**: team lead, re-identification
+- **Haroon Siddiqui**: detection and tracking
+- **Saif Almashjari**: marker cap gate
+- **Mohsin Al Hashmi** and **Talal Almahri**: platform and sensing
 
-For the legacy laptop-side prototype (§11), install:
-```bash
-pip install -r requirements.txt
-python scripts/download_weights.py   # one-time ReID weight download
-```
+Supervised by Prof. Mohammed Ghazal and Eng. Yaser Othman.
 
-## 8. Running the Robot — Full Walkthrough
+## License
 
-1. **Connect to the same network as the robot**, then SSH in:
-   ```bash
-   ssh capstone@turtlebot1.local
-   ```
-2. **Launch the full stack** (bringup, velocity relay, safety node, LiDAR, perception):
-   ```bash
-   bash ~/robot_v3.sh
-   ```
-   Keep this terminal open — closing it stops all robot services. The on-screen board
-   lets you `s` (stop), `r` (restart), `l` (tail the perception log), or `q` (quit).
-3. **Open the web UI** in a browser on the same network:
-   ```
-   http://turtlebot1.local:5000
-   ```
-4. **Register the target:** have them wear the marker cap (number panel facing away from
-   them — it sits on the back of the head) and **click on them** in the video feed. The
-   robot enters `REGISTERING`; have the target turn slowly for a few seconds to capture
-   diverse views, then it automatically proceeds to `IDENTIFICATION` and locks on.
-5. **Walk around.** The robot should keep ~2 m distance, turn to stay centred on the
-   target, and ignore bystanders — including a look-alike wearing similar clothing but
-   not the marker cap.
-6. To stop, use the `s` control in the launch terminal, or `Ctrl+C`.
-
-## 9. Results
-
-Measured from real recorded runs of the deployed system:
-- **~17–18 FPS** end-to-end (detection + tracking + ReID + attributes + cap detection),
-  stable across 1–4 people in frame.
-- **Cap-marker separation:** the registered target's cap-detector score consistently
-  reads **0.06–0.18**; bystanders read **0.00–0.02** (decision threshold: 0.025) — a
-  clean margin that holds across different clothing colours and lighting.
-- **Occlusion recovery:** in a multi-person test run, the robot recovered onto the
-  correct target roughly **9 seconds** after a full occlusion loss.
-- Across recorded multi-person test runs, the system held its lock on the correct,
-  registered target with **no confirmed wrong-person switches**.
-- A controlled **side-by-side comparison** (appearance-ReID-only vs. the full cap-gated
-  system, run on identical footage) shows the ReID-only baseline losing its lock onto a
-  bystander after an occlusion/crossing event, while the cap-gated system holds — and
-  recovers — the correct target for the remainder of the clip.
-
-## 10. Known Limitations & Future Work
-
-- The cap gate currently detects **the marker's colour**, not a cap-specific pattern —
-  a second object of the same colour in frame would also register. A future version
-  could add a unique visual code (e.g. reading the printed number, or an ArUco-style
-  tag) for true per-marker specificity.
-- The robot currently decelerates abruptly the instant a target is lost, rather than
-  coasting through a brief occlusion before entering its search behaviour — a smoother
-  "coast through occlusion" transition is planned.
-- An RF-based identity tag (e.g. UWB ranging) was investigated as an alternative,
-  appearance-independent identity signal that would work even when the visual marker is
-  hidden. It was deferred in favour of the zero-extra-hardware visual marker for this
-  submission, but remains a promising direction for future hardware iterations.
-- The system is designed for indoor, single-target following; multi-target and outdoor
-  operation are out of scope for this submission.
-
-## 11. Project History / Legacy Prototype
-
-Earlier in development, perception ran **offboard** on a laptop (streaming frames to the
-robot over WiFi) using a different detector/ReID stack (`ros2_ws/`, `requirements.txt`,
-`scripts/run_perception.py`). This was superseded by the current fully on-board
-Hailo-8L pipeline described above, which removes the laptop dependency entirely and adds
-the marker-cap identity gate. The legacy code is kept in the repository for historical
-reference and is not part of the final submitted system.
+Not yet chosen. Until a license file is added, all rights are reserved.
