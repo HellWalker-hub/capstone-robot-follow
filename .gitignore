@@ -22,3 +22,16 @@ data/
 ros2_ws/build/
 ros2_ws/install/
 ros2_ws/log/
+
+# Hailo compiled models: download separately, never commit
+*.hef
+*.har
+
+# ROS bags
+*.bag
+*.db3
+*.mcap
+rosbag2_*/
+
+# Office lock files
+~$*

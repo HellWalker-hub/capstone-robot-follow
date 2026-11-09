@@ -1,9 +1,15 @@
-ultralytics>=8.0.0
-torch>=2.0.0
-torchvision>=0.15.0
-opencv-python>=4.8.0
-numpy>=1.24.0
-scipy>=1.10.0
-huggingface_hub
-onnxruntime
-pyyaml
+# Laptop / CPU path only (USE_HAILO unset). Versions are the ones this code was run
+# with on macOS, Python 3.13.
+#
+# The robot path does NOT use this file. It needs HailoRT 4.20.0 and its Python
+# bindings from the Hailo SDK (not on PyPI) plus ROS 2 Jazzy; see the README.
+ultralytics==8.4.51
+torch==2.12.0
+torchvision==0.27.0
+opencv-python==4.13.0.92
+numpy==2.4.4
+scipy==1.17.1
+huggingface_hub==1.15.0
+onnxruntime==1.26.0
+PyYAML==6.0.3
+lap==0.5.13
