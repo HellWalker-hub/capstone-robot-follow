@@ -233,19 +233,9 @@ deploy/
   lidar_bridge.py      forwards /scan to the perception process
 ros2_ws/               the first prototype's ROS 2 package (laptop over Wi-Fi), kept for history
 docs/ARCHITECTURE.md   design notes
+docs/media/            README demo GIF
 ```
-
-## Team
-
-Senior capstone, B.Sc. Computer Engineering, College of Engineering, Abu Dhabi University.
-
-- **Muaadh Al-Haddad**: team lead, re-identification
-- **Haroon Siddiqui**: detection and tracking
-- **Saif Almashjari**: marker cap gate
-- **Mohsin Al Hashmi** and **Talal Almahri**: platform and sensing
-
-Supervised by Prof. Mohammed Ghazal and Eng. Yaser Othman.
 
 ## License
 
-Not yet chosen. Until a license file is added, all rights are reserved.
+MIT. See [LICENSE](LICENSE).
