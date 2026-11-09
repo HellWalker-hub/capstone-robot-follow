@@ -11,6 +11,7 @@ if os.environ.get("USE_HAILO", "0") == "1":
     from perception.reid.hailo_attributes import HailoAttributes
 else:
     from perception.reid.osnet_reid import OSNetReID
+    HailoAttributes = None  # attribute model only exists on the Hailo path
 from perception.occlusion.cmoh import CMOH
 from perception.cap_detector import CapDetector, CAP_THRESHOLD
 
@@ -64,7 +65,9 @@ class FollowPipeline:
             track_buffer=cfg.get("track_buffer", 90),
         )
         self.reid = OSNetReID(model_name=cfg.get("reid_model", "osnet_x1_0"))
-        self.attr = HailoAttributes()
+        # Without the Hailo attribute model the pipeline matches on appearance alone;
+        # the combined-score branches already skip attributes when no vector is captured.
+        self.attr = HailoAttributes() if HailoAttributes is not None else None
         self.cap = CapDetector()
         self.cmoh = CMOH(
             k=cfg.get("cmoh_k", 10),
@@ -253,6 +256,8 @@ class FollowPipeline:
     # ------------------------------------------------------------------
 
     def _extract_all_attrs(self, frame, tracks):
+        if self.attr is None:
+            return {}
         attrs = {}
         for track in tracks:
             tid = int(track[4])
@@ -363,7 +368,7 @@ class FollowPipeline:
             key=lambda t: (((t[0]+t[2])/2 - cx)**2 + ((t[1]+t[3])/2 - cy)**2)
         )
         emb = self.reid.extract(frame, best_track[:4])
-        attr_vec = self.attr.extract(frame, best_track[:4])
+        attr_vec = self.attr.extract(frame, best_track[:4]) if self.attr is not None else None
         if attr_vec is not None and attr_vec.size > 0:
             self._reg_attr_samples.append(attr_vec)
 
