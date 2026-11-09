@@ -100,7 +100,7 @@ More detail, including file-by-file notes, is in [docs/ARCHITECTURE.md](docs/ARC
 | Camera | UGREEN USB webcam |
 | LiDAR | LDROBOT 360° LiDAR (LDS-02 form factor) |
 | Middleware | ROS 2 Jazzy, CycloneDDS |
-| Models | YOLOv11n, OSNet x1.0, person_attr_resnet_v1_18 (PETA), all as precompiled Hailo HEF files |
+| Models | YOLOv11n, OSNet x1.0, person_attr_resnet_v1_18 (PETA), all as HEF files compiled for the Hailo-8L |
 
 Everything runs on the robot. There is no laptop in the loop.
 
@@ -173,10 +173,11 @@ HailoRT 4.20.0, TurtleBot3 Burger. The laptop demo was run on macOS with Python 
    sudo apt install linux-headers-$(uname -r)
    sudo dkms install hailo_pci/4.20.0 -k $(uname -r)
    ```
-3. Models. We used precompiled HEF files for `hailo8l` from the Hailo Model Zoo (the
-   attribute model came from Model Zoo v2.15.0) rather than compiling our own:
-   `yolov11n.hef`, `osnet_x1_0.hef`, `person_attr_resnet_v1_18.hef`. The code currently
-   expects them in `/home/capstone/hailo_demo/models/`.
+3. Models. The three HEF files are not in this repository: `yolov11n.hef`,
+   `osnet_x1_0.hef` and `person_attr_resnet_v1_18.hef`, each built for the `hailo8l` target.
+   All three are Hailo Model Zoo architectures; any that are not available precompiled for
+   `hailo8l` can be compiled with the Hailo Dataflow Compiler. The code currently expects
+   them in `/home/capstone/hailo_demo/models/`.
 4. Copy the files in `deploy/` to the robot's home directory. `deploy/robot_v3.sh` expects
    them there and runs the perception code from `~/capstone-robot-follow-cap`.
 5. Start everything inside tmux. The launcher stops all services when its terminal closes, so
